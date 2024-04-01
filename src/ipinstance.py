@@ -54,3 +54,36 @@ class IPInstance:
     A_str = "\n".join([" ".join([str(j) for j in self.A[i]]) for i in range(0,self.A.shape[0])])
     out+=f"A:\n{A_str}"
     return out
+  
+  def solve(self):
+    mvars = [self.model.continuous_var(name='mvar_{0}'.format(i), lb=0, ub=1) for i in range(self.numTests)]
+
+    for i in range(self.numDiseases):
+      for j in range(self.numDiseases):
+        if (i!= j):
+          # summation = 0
+          # for k in range(self.numTests):
+          #   summation += np.abs(self.A[k][j] - self.A[k][i])
+          diff = [np.abs(self.A[k][j] - self.A[k][i]) for k in range(self.numTests)]
+          self.model.add_constraint(self.model.sum(diff[k] * mvars[k] for k in range(self.numTests)) >= 1)
+
+    self.model.minimize(self.model.sum(mvars[i] * self.costOfTest[i] for i in range(self.numTests)))
+
+    sol  = self.model.solve()
+
+    obj_value = np.ceil(self.model.objective_value) 
+    if sol:
+       self.model.print_information()
+       
+       print(f"Objective Value: {obj_value}")
+    else:
+       print("No solution found!")
+    # for x in range(len(mvars)):
+    #   self.model.add_constraint(np.sum(np.abs(self.A[k][j] - self.A[k][i])) >= 1)
+
+    
+
+
+    
+
+  
