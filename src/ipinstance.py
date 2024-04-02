@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import numpy  as np
 from docplex.mp.model import Model
+import queue
 
 @dataclass(frozen=True)
 class IPConfig:
@@ -44,6 +45,10 @@ class IPInstance:
     self.costOfTest = cst
     self.A = A
     self.model = Model() #CPLEX solver
+    self.mvars = [self.model.integer_var(name='mvar_{0}'.format(i), lb=0, ub=1) for i in range(self.numTests)]
+    self.incumbent_val = self.solve()
+    self.incumbent_mvars = [self.model.integer_var(name='mvar_{0}'.format(i), lb=0, ub=1) for i in range(self.numTests)]
+    self.queue = queue.PriorityQueue()
   
   def toString(self):
     out = ""
@@ -55,8 +60,34 @@ class IPInstance:
     out+=f"A:\n{A_str}"
     return out
   
+  def branch_and_bound(self):
+    
+    for i in range(self.numTests):
+       self.queue.put(i)
+    
+    doneBoth = False
+    currTest = 0
+    while not self.queue.empty():
+      if(doneBoth == True):
+        currTest = self.queue.get()
+        doneBoth = False
+      self.model.add_constraint(self.mvars[currTest] == 1)
+      currObj = self.solve()
+      if currObj is None:
+         pass
+      if currObj > self.incumbent_val:
+         #do nothing?
+         pass
+      if self.is_integer_solution():
+        #do nothing?
+        pass
+      if currObj < self.incumbent_val:
+        self.incumbent_val = currObj
+        self.incumbent_mvars = self.vars
+      
+                    
   def solve(self):
-    mvars = [self.model.continuous_var(name='mvar_{0}'.format(i), lb=0, ub=1) for i in range(self.numTests)]
+    # mvars = [self.model.integer_var(name='mvar_{0}'.format(i), lb=0, ub=1) for i in range(self.numTests)]
 
     for i in range(self.numDiseases):
       for j in range(self.numDiseases):
@@ -65,23 +96,35 @@ class IPInstance:
           # for k in range(self.numTests):
           #   summation += np.abs(self.A[k][j] - self.A[k][i])
           diff = [np.abs(self.A[k][j] - self.A[k][i]) for k in range(self.numTests)]
-          self.model.add_constraint(self.model.sum(diff[k] * mvars[k] for k in range(self.numTests)) >= 1)
+          self.model.add_constraint(self.model.sum(diff[k] * self.mvars[k] for k in range(self.numTests)) >= 1)
 
-    self.model.minimize(self.model.sum(mvars[i] * self.costOfTest[i] for i in range(self.numTests)))
+    self.model.minimize(self.model.sum(self.mvars[i] * self.costOfTest[i] for i in range(self.numTests)))
 
     sol  = self.model.solve()
 
     obj_value = np.ceil(self.model.objective_value) 
+
+    
     if sol:
-       self.model.print_information()
-       
-       print(f"Objective Value: {obj_value}")
+        self.model.print_information()
+        # mvars_values = [mvar.solution_value for mvar in self.mvars]
+        print(f"Objective Value: {obj_value}")
+        # print(f"mvars values: {mvars_values}")
+        return obj_value
     else:
        print("No solution found!")
+       return None
+       
     # for x in range(len(mvars)):
     #   self.model.add_constraint(np.sum(np.abs(self.A[k][j] - self.A[k][i])) >= 1)
 
-    
+
+  def is_integer_solution(self):
+    sol  = self.model.solve()
+    for mvar in self.mvars:
+        if not sol.get_values([mvar])[0].is_integer():
+            return False
+    return True
 
 
     
