@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import numpy  as np
 from docplex.mp.model import Model
 import heapq as pq
+from util import check_integer_solution
 
 @dataclass(frozen=True)
 class IPConfig:
@@ -37,6 +38,8 @@ def data_parse(filename : str) :
         print(f"Error reading instance file. File format may be incorrect.{e}")
         exit(1)
 
+# TODO: make sure that the Node is ordered correctly in the priority queue
+# potentially use dataclass ?
 class Node:
     def __init__(self, lp_objective_value: float, decisions: dict = {}):
         # floating point value of the LP relaxation
@@ -85,47 +88,92 @@ class IPInstance:
         out += f"Cost of tests: {cst_str}\n"
         A_str = "\n".join([" ".join([str(j) for j in self.A[i]]) for i in range(0,self.A.shape[0])])
         out += f"A:\n{A_str}"
-        
         return out
 
-    def branch(parent: Node):
+    def branch(self, parent: Node):
         """ Gives us two children nodes by branching on the next variable """
         
-        # choose variable to branch on
+        # choose variable to branch on based on current decisions + some heuristic
+        picked_variable = self.pick_variable(parent.decisions)
         
-        # make the children nodes (solve the LP relaxation)
-        
-        # assess the nodes (incumbent, prune, add to queue)
+        # make the children nodes (solve the LP relaxation for each child node)
+        for decision in [0, 1]:
+            # create a new node with the parent's decisions + the new decision
+            new_decisions = parent.decisions.copy()
+            new_decisions[picked_variable] = decision
+            
+            # need to update the model with the new decisions and solve the LP relaxation
+            self.update_model(new_decisions)
+            new_objective, new_solution = self.model.solve_lp()
+            
+            # check if the solution is feasible
+            if new_objective is None:
+                continue
+            
+            # check if dominated by the incumbent
+            if new_objective >= self.incumbent.lp_objective_value:
+                continue
+            
+            # check if we have a new incumbent / solution is IP
+            if check_integer_solution(new_solution):
+                # TODO: update the incumbent, potentially prune the queue
+                pass
+            
+            # add the new node to the priority queue
+            new_node = Node(new_objective, new_decisions)
+            pq.heappush(self.pq, new_node)
     
-    def pick_variable(self):
+    def pick_variable(self, current_decisions: dict, solution) -> str:
         """ Heuristics for picking the next variable """
-        pass
-  
+        use_vars = ["use_" + i for i in range(self.numTests)]
+        use_vars_available = [i for i in use_vars if i not in current_decisions]
+        
+        assert len(use_vars_available) > 0, "No variables left to branch on"
+        
+        # check how close each variable is to being an integer, select the one that is the farthest
+        # TODO: apparently, solution[i] simply returns 0 and doesn't fail. do we do smth about it?
+        thresh = [abs(solution[i] - round(solution[i])) for i in use_vars_available]
+        
+        assert max(thresh) != 0, "No fractional variables found"
+        
+        # return the variable name
+        return use_vars_available[thresh.index(max(thresh))]
+
+    def update_model(self, new_decisions: dict):
+        """ Update the model with the new decisions """
+        # remove all the old decisions
+        decision_constraints = ["decision_" + i for i in range(self.numTests)]
+        for decision in decision_constraints:
+            self.model.remove_constraint(decision)
+        
+        # add all the decisions back + the new ones
+        for decision in new_decisions:
+            # TODO: need to add names for these decisions ???
+            self.model.add_constraint(self.use_vars[decision] == new_decisions[decision])
+
     def solve_lp(self):
         """ Solve the LP relaxation """
-        sol = self.model.solve()
-
-        obj_value = self.model.objective_value
-        if sol:
-            self.model.print_information()
-       
-            print(f"Objective Value: {obj_value}")
-        else:
-            print("No solution found!")
-
-    def solve_ip(self):
-        """ Branch and bound implementation to solve IP using LP"""
+        solution = self.model.solve()
         
+        if not solution:
+            # print("No solution found!")
+            return None, None
+        else:
+            # self.model.print_information()
+            # print(f"Objective Value: {self.model.objective_value}")
+            return self.model.objective_value, solution
+
+    def solve_ip(self) -> Node:
+        """ Branch and bound implementation to solve IP using LP"""
         while not self.pq:
             # pick the next node to explore
             parent_node = pq.heappop(self.pq)
 
-            # check if the node is dominated by the incumbent, if so prune it
-            if parent_node.lp_objective_value >= self.incumbent.lp_objective_value:
-                continue
-            
             # branch on the node
-            self.branch()
+            self.branch(parent_node)
+        
+        # when done, return the incumbent
+        return self.incumbent
             
             
             
