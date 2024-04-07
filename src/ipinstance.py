@@ -3,9 +3,15 @@ import numpy  as np
 from docplex.mp.model import Model
 import heapq as pq
 from util import check_integer_solution
+import heapq as pq
+from util import check_integer_solution
 
 @dataclass(frozen=True)
 class IPConfig:
+    numTests: int # number of tests
+    numDiseases: int # number of diseases
+    costOfTest: np.ndarray #[numTests] the cost of each test
+    A: np.ndarray #[numTests][numDiseases] 0/1 matrix if test is positive for disease
     numTests: int # number of tests
     numDiseases: int # number of diseases
     costOfTest: np.ndarray #[numTests] the cost of each test
@@ -25,7 +31,11 @@ def data_parse(filename : str) :
         with open(filename,"r") as fl:
             numTests = int(fl.readline().strip()) #n 
             numDiseases = int(fl.readline().strip()) #m
+        with open(filename,"r") as fl:
+            numTests = int(fl.readline().strip()) #n 
+            numDiseases = int(fl.readline().strip()) #m
 
+            costOfTest = np.array([float(i) for i in fl.readline().strip().split()])
             costOfTest = np.array([float(i) for i in fl.readline().strip().split()])
 
             A = np.zeros((numTests,numDiseases))
@@ -34,7 +44,15 @@ def data_parse(filename : str) :
 
         return numTests, numDiseases, costOfTest, A
 
+            A = np.zeros((numTests,numDiseases))
+            for i in range(0,numTests):
+                A[i,:] = np.array([int(i) for i in fl.readline().strip().split() ])
+
+        return numTests, numDiseases, costOfTest, A
+
     except Exception as e:
+        print(f"Error reading instance file. File format may be incorrect.{e}")
+        exit(1)
         print(f"Error reading instance file. File format may be incorrect.{e}")
         exit(1)
 
@@ -62,6 +80,8 @@ class IPInstance:
         # add problem constraints: use_vars[i] = 1 if test i is used, 0 otherwise
         self.use_vars = [self.model.continuous_var(name='use_{0}'.format(i), lb=0, ub=1)
                          for i in range(self.numTests)]
+        
+        print("I made vars")
 
         # for every pair of diseases, there must be at least one test that can distinguish them
         for i in range(self.numDiseases):
@@ -77,10 +97,17 @@ class IPInstance:
         
         # store the incumbent
         self.incumbent: Node = Node(float('inf'))
-        
+        print("created initial incumbent")
         # initialize the priority queue to the root node
-        self.model.solve_lp()
-        self.priority_queue = pq.heapify([Node(self.model.objective_value)])
+        self.solve_lp()
+        print(self.model.objective_value)
+        self.priority_queue = []
+        pq.heappush(self.priority_queue, Node(self.model.objective_value)) #??
+        print(self.priority_queue)
+        self.solve_ip()
+        print("solve IP")
+        
+        
   
     def toString(self):
         out = ""

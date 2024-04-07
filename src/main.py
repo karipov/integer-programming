@@ -11,7 +11,6 @@ def main(filepath : str):
 	watch.start()
 	solver = IPInstance(filepath)
 	inst_str = solver.toString()
-	solver.solve()
 	watch.stop()
 	print(inst_str)
 
