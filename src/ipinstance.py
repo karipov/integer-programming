@@ -3,8 +3,7 @@ import numpy  as np
 from docplex.mp.model import Model
 import heapq as pq
 from util import check_integer_solution
-import heapq as pq
-from util import check_integer_solution
+from functools import total_ordering
 
 @dataclass(frozen=True)
 class IPConfig:
@@ -31,18 +30,7 @@ def data_parse(filename : str) :
         with open(filename,"r") as fl:
             numTests = int(fl.readline().strip()) #n 
             numDiseases = int(fl.readline().strip()) #m
-        with open(filename,"r") as fl:
-            numTests = int(fl.readline().strip()) #n 
-            numDiseases = int(fl.readline().strip()) #m
-
             costOfTest = np.array([float(i) for i in fl.readline().strip().split()])
-            costOfTest = np.array([float(i) for i in fl.readline().strip().split()])
-
-            A = np.zeros((numTests,numDiseases))
-            for i in range(0,numTests):
-                A[i,:] = np.array([int(i) for i in fl.readline().strip().split() ])
-
-        return numTests, numDiseases, costOfTest, A
 
             A = np.zeros((numTests,numDiseases))
             for i in range(0,numTests):
@@ -53,11 +41,10 @@ def data_parse(filename : str) :
     except Exception as e:
         print(f"Error reading instance file. File format may be incorrect.{e}")
         exit(1)
-        print(f"Error reading instance file. File format may be incorrect.{e}")
-        exit(1)
 
 # TODO: make sure that the Node is ordered correctly in the priority queue
 # potentially use dataclass ?
+@total_ordering
 class Node:
     def __init__(self, lp_objective_value: float, decisions: dict = {}, next_variable = None):
         # floating point value of the LP relaxation
@@ -66,6 +53,16 @@ class Node:
         self.decisions = decisions
         # next variable that will be picked
         self.next_variable = next_variable
+    
+    def __eq__(self, other):
+        if not isinstance(other, __class__):
+            return NotImplemented
+        return self.lp_objective_value == other.lp_objective_value
+
+    def __lt__(self, other):
+        if not isinstance(other, __class__):
+            return NotImplemented
+        return self.lp_objective_value < other.lp_objective_value
     
 
 class IPInstance:
@@ -81,7 +78,7 @@ class IPInstance:
         self.use_vars = [self.model.continuous_var(name='use_{0}'.format(i), lb=0, ub=1)
                          for i in range(self.numTests)]
         
-        print("I made vars")
+        print("[INFO] created initial vars")
 
         # for every pair of diseases, there must be at least one test that can distinguish them
         for i in range(self.numDiseases):
@@ -97,17 +94,13 @@ class IPInstance:
         
         # store the incumbent
         self.incumbent: Node = Node(float('inf'))
-        print("created initial incumbent")
+
         # initialize the priority queue to the root node
-        self.solve_lp()
-        print(self.model.objective_value)
+        objective_value, solution = self.solve_lp()
+
         self.priority_queue = []
-        pq.heappush(self.priority_queue, Node(self.model.objective_value)) #??
-        print(self.priority_queue)
-        self.solve_ip()
-        print("solve IP")
-        
-        
+        pq.heappush(self.priority_queue,
+                    Node(objective_value, {}, self.pick_variable({}, solution)))
   
     def toString(self):
         out = ""
@@ -130,7 +123,7 @@ class IPInstance:
             
             # need to update the model with the new decisions and solve the LP relaxation
             decision_constraints = self.add_decisions(new_decisions)
-            new_objective, new_solution = self.model.solve_lp()
+            new_objective, new_solution = self.solve_lp()
             # make sure to remove the decision constraints for the next iteration
             self.remove_decisions(decision_constraints) 
             
@@ -143,20 +136,23 @@ class IPInstance:
                 continue
             
             # check if we have a new incumbent / solution is IP
-            if check_integer_solution(new_solution):
-                # TODO: update the incumbent, potentially prune the queue
-                pass
+            if check_integer_solution(new_solution, self.numTests):
+                # check if the new integer solution is better than the incumbent
+                if new_objective < self.incumbent.lp_objective_value:
+                    # if so, update the incumbent
+                    self.incumbent = Node(new_objective, new_decisions)
+                continue
                 
             # pre-choose some variable to branch on based on current decisions + some heuristic
             next_variable = self.pick_variable(new_decisions, new_solution)
             
             # add the new node to the priority queue
             new_node = Node(new_objective, new_decisions, next_variable)
-            pq.heappush(self.pq, new_node)
+            pq.heappush(self.priority_queue, new_node)
     
     def pick_variable(self, current_decisions: dict, solution) -> str:
         """ Heuristics for picking the next variable """
-        use_vars = ["use_" + i for i in range(self.numTests)]
+        use_vars = [f"use_{i}" for i in range(self.numTests)]
         use_vars_available = [i for i in use_vars if i not in current_decisions]
         
         assert len(use_vars_available) > 0, "No variables left to branch on"
@@ -173,7 +169,8 @@ class IPInstance:
     def add_decisions(self, new_decisions: dict):
         """ Update the model with the new decisions """
         # add new decisions to the model
-        decision_constraints = [self.use_vars[i] == new_decisions[i] for i in new_decisions]
+        # print("[INFO]", new_decisions)
+        decision_constraints = [self.use_vars[int(i.split('_')[1])] == new_decisions[i] for i in new_decisions]
         new_constraints = self.model.add_constraints(decision_constraints)
         
         # return the new constraints (they will need to be cleared in the future)
@@ -197,14 +194,15 @@ class IPInstance:
 
     def solve_ip(self) -> Node:
         """ Branch and bound implementation to solve IP using LP"""
-        while not self.pq:
+        while self.priority_queue:
             # pick the next node to explore
-            parent_node = pq.heappop(self.pq)
+            parent_node = pq.heappop(self.priority_queue)
 
             # branch on the node
             self.branch(parent_node)
         
         # when done, return the incumbent
+        print("[INFO] done with branch and bound")
         return self.incumbent
             
             
