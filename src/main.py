@@ -18,7 +18,7 @@ def main(filepath : str):
     sol_dict ={
         "Instance" : filename,
         "Time" : str(watch.getElapsed()),
-        "Result" : int(objective_value),
+        "Result" : round(objective_value),
         "Solution" : "OPT"
     }
     print(json.dumps(sol_dict))	

@@ -161,6 +161,11 @@ class IPInstance:
         # TODO: apparently, solution[i] simply returns 0 and doesn't fail. do we do smth about it?
         thresh = [abs(solution[i] - round(solution[i])) for i in use_vars_available]
         
+        # TODO: branch only on fractional variables (not integer ones!)
+        # TODO: incorporate randomness because we are using a very greedy approach
+        # top-k selection (select randomly from top 3 variables farthest from being integer)
+        
+        
         assert max(thresh) != 0, "No fractional variables found"
         
         # return the variable name
