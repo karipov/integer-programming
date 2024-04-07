@@ -41,11 +41,13 @@ def data_parse(filename : str) :
 # TODO: make sure that the Node is ordered correctly in the priority queue
 # potentially use dataclass ?
 class Node:
-    def __init__(self, lp_objective_value: float, decisions: dict = {}):
+    def __init__(self, lp_objective_value: float, decisions: dict = {}, next_variable = None):
         # floating point value of the LP relaxation
         self.lp_objective_value = lp_objective_value
         # decisions made: i -> 1 if test i is used, 0 otherwise
         self.decisions = decisions
+        # next variable that will be picked
+        self.next_variable = next_variable
     
 
 class IPInstance:
@@ -93,18 +95,17 @@ class IPInstance:
     def branch(self, parent: Node):
         """ Gives us two children nodes by branching on the next variable """
         
-        # choose variable to branch on based on current decisions + some heuristic
-        picked_variable = self.pick_variable(parent.decisions)
-        
         # make the children nodes (solve the LP relaxation for each child node)
         for decision in [0, 1]:
             # create a new node with the parent's decisions + the new decision
             new_decisions = parent.decisions.copy()
-            new_decisions[picked_variable] = decision
+            new_decisions[parent.next_variable] = decision
             
             # need to update the model with the new decisions and solve the LP relaxation
-            self.update_model(new_decisions)
+            decision_constraints = self.add_decisions(new_decisions)
             new_objective, new_solution = self.model.solve_lp()
+            # make sure to remove the decision constraints for the next iteration
+            self.remove_decisions(decision_constraints) 
             
             # check if the solution is feasible
             if new_objective is None:
@@ -118,9 +119,12 @@ class IPInstance:
             if check_integer_solution(new_solution):
                 # TODO: update the incumbent, potentially prune the queue
                 pass
+                
+            # pre-choose some variable to branch on based on current decisions + some heuristic
+            next_variable = self.pick_variable(new_decisions, new_solution)
             
             # add the new node to the priority queue
-            new_node = Node(new_objective, new_decisions)
+            new_node = Node(new_objective, new_decisions, next_variable)
             pq.heappush(self.pq, new_node)
     
     def pick_variable(self, current_decisions: dict, solution) -> str:
@@ -139,17 +143,18 @@ class IPInstance:
         # return the variable name
         return use_vars_available[thresh.index(max(thresh))]
 
-    def update_model(self, new_decisions: dict):
+    def add_decisions(self, new_decisions: dict):
         """ Update the model with the new decisions """
-        # remove all the old decisions
-        decision_constraints = ["decision_" + i for i in range(self.numTests)]
-        for decision in decision_constraints:
-            self.model.remove_constraint(decision)
+        # add new decisions to the model
+        decision_constraints = [self.use_vars[i] == new_decisions[i] for i in new_decisions]
+        new_constraints = self.model.add_constraints(decision_constraints)
         
-        # add all the decisions back + the new ones
-        for decision in new_decisions:
-            # TODO: need to add names for these decisions ???
-            self.model.add_constraint(self.use_vars[decision] == new_decisions[decision])
+        # return the new constraints (they will need to be cleared in the future)
+        return new_constraints
+
+    def remove_decisions(self, old_constraints):
+        """ Remove the decisions from the model """
+        self.model.remove_constraints(old_constraints)
 
     def solve_lp(self):
         """ Solve the LP relaxation """
