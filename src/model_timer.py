@@ -20,6 +20,6 @@ class Timer:
 
     def getElapsed(self):
         if self.running:
-            return round((time.time_ns() - self.start_time)/_NANO,4)
+            return round((time.time_ns() - self.start_time)/_NANO,2)
         else:
-            return round((self.end_time - self.start_time)/_NANO,4)
+            return round((self.end_time - self.start_time)/_NANO,2)
