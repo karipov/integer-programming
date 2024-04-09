@@ -2,7 +2,6 @@ from dataclasses import dataclass
 import numpy  as np
 from docplex.mp.model import Model
 import heapq as pq
-from util import check_integer_solution
 from functools import total_ordering
 
 @dataclass(frozen=True)
@@ -181,6 +180,7 @@ class IPInstance:
 
         # get the heuristic of each test and sort by highest value first
         use_vars_cost = [(i, self.cost_effective_use[i] * thresh[i]) for i in use_vars_noninteger]
+        print("[INFO]", use_vars_cost)
         top_var = max(use_vars_cost, key=lambda x: x[1])[0]
         
         return top_var
