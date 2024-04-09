@@ -1,3 +1,5 @@
+# Ignore virtual environment
+p4_venv/*
 p4_venv
 
 # Byte-compiled / optimized / DLL files
