@@ -177,13 +177,15 @@ class IPInstance:
         # TODO: apparently, solution[i] simply returns 0 and doesn't fail. do we do smth about it?
         thresh = {i: abs(solution[i] - round(solution[i])) for i in use_vars_noninteger}
         assert max(thresh) != 0, "No fractional variables found"
-
-        # get the heuristic of each test and sort by highest value first
-        use_vars_cost = [(i, self.cost_effective_use[i] * thresh[i]) for i in use_vars_noninteger]
-        print("[INFO]", use_vars_cost)
-        top_var = max(use_vars_cost, key=lambda x: x[1])[0]
         
-        return top_var
+        return max(thresh, key=thresh.get)
+
+        # # get the heuristic of each test and sort by highest value first
+        # use_vars_cost = [(i, round(self.cost_effective_use[i] * (thresh[i] ** 2), 2)) for i in use_vars_noninteger]
+        # top_var = max(use_vars_cost, key=lambda x: x[1])[0]
+        # # print("[INFO]",top_var, use_vars_cost)
+        
+        # return top_var
 
     def add_decisions(self, new_decisions: dict):
         """ Update the model with the new decisions """
