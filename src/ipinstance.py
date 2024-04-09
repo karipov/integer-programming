@@ -16,15 +16,6 @@ class IPConfig:
     costOfTest: np.ndarray #[numTests] the cost of each test
     A: np.ndarray #[numTests][numDiseases] 0/1 matrix if test is positive for disease
 
-
-#  * File Format
-#  * #Tests (i.e., n)
-#  * #Diseases (i.e., m)
-#  * Cost_1 Cost_2 . . . Cost_n
-#  * A(1,1) A(1,2) . . . A(1, m)
-#  * A(2,1) A(2,2) . . . A(2, m)
-#  * . . . . . . . . . . . . . .
-#  * A(n,1) A(n,2) . . . A(n, m)
 def data_parse(filename : str) :
     try:
         with open(filename,"r") as fl:
@@ -42,8 +33,16 @@ def data_parse(filename : str) :
         print(f"Error reading instance file. File format may be incorrect.{e}")
         exit(1)
 
-# TODO: make sure that the Node is ordered correctly in the priority queue
-# potentially use dataclass ?
+
+def check_integer_solution(solution, num_tests) -> bool:
+    """
+    Checks if our LP relaxation solution is a solution to the IP problem
+    """
+    threshold = 1e-5
+    thresh_check = lambda x: abs(x - round(x)) < threshold
+    all_values = [solution.get_value(f"use_{i}") for i in range(num_tests)]
+    return all(map(thresh_check, all_values))
+
 @total_ordering
 class Node:
     def __init__(self, lp_objective_value: float, decisions: dict = {}, next_variable = None):
@@ -79,6 +78,8 @@ class IPInstance:
                          for i in range(self.numTests)]
         
         print("[INFO] created initial vars")
+        
+        # ---------------------- DECISION VARIABLES ----------------------
 
         # for every pair of diseases, there must be at least one test that can distinguish them
         for i in range(self.numDiseases):
@@ -91,6 +92,19 @@ class IPInstance:
         # minimize the costs of all the used tests
         costs = [self.use_vars[i] * self.costOfTest[i] for i in range(self.numTests)]
         self.model.minimize(self.model.sum(costs))
+        
+        # ------------------ INITIALIZE BRANCH AND BOUND -----------------
+        
+        # intialize heuristic variables
+        COST_MULTIPLIER = 1
+        self.cost_effective_use = {}
+        for i in range(self.numTests):
+            discriminative = 0
+            for j in range(self.numDiseases):
+                for k in range(self.numDiseases):
+                    if (j != k):
+                        discriminative += np.abs(self.A[i][j] - self.A[i][k])
+            self.cost_effective_use[f"use_{i}"] = discriminative / (self.costOfTest[i] * COST_MULTIPLIER)
         
         # store the incumbent
         self.incumbent: Node = Node(float('inf'))
@@ -116,7 +130,7 @@ class IPInstance:
         """ Gives us two children nodes by branching on the next variable """
         
         # make the children nodes (solve the LP relaxation for each child node)
-        for decision in [0, 1]:
+        for decision in [1, 0]:
             # create a new node with the parent's decisions + the new decision
             new_decisions = parent.decisions.copy()
             new_decisions[parent.next_variable] = decision
@@ -154,22 +168,22 @@ class IPInstance:
         """ Heuristics for picking the next variable """
         use_vars = [f"use_{i}" for i in range(self.numTests)]
         use_vars_available = [i for i in use_vars if i not in current_decisions]
-        
         assert len(use_vars_available) > 0, "No variables left to branch on"
         
-        # check how close each variable is to being an integer, select the one that is the farthest
+        # filter only the variables that are not integers
+        is_integer = lambda x: abs(x - round(x)) < 1e-5
+        use_vars_noninteger = [i for i in use_vars_available if not is_integer(solution[i])]
+        
+        # check how close each variable is to being an integer
         # TODO: apparently, solution[i] simply returns 0 and doesn't fail. do we do smth about it?
-        thresh = [abs(solution[i] - round(solution[i])) for i in use_vars_available]
-        
-        # TODO: branch only on fractional variables (not integer ones!)
-        # TODO: incorporate randomness because we are using a very greedy approach
-        # top-k selection (select randomly from top 3 variables farthest from being integer)
-        
-        
+        thresh = {i: abs(solution[i] - round(solution[i])) for i in use_vars_noninteger}
         assert max(thresh) != 0, "No fractional variables found"
+
+        # get the heuristic of each test and sort by highest value first
+        use_vars_cost = [(i, self.cost_effective_use[i] * thresh[i]) for i in use_vars_noninteger]
+        top_var = max(use_vars_cost, key=lambda x: x[1])[0]
         
-        # return the variable name
-        return use_vars_available[thresh.index(max(thresh))]
+        return top_var
 
     def add_decisions(self, new_decisions: dict):
         """ Update the model with the new decisions """
