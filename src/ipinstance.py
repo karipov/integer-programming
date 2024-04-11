@@ -74,8 +74,9 @@ class IPInstance:
         np.random.seed(44)
         
         # add problem constraints: use_vars[i] = 1 if test i is used, 0 otherwise
-        self.use_vars = [self.model.continuous_var(name='use_{0}'.format(i), lb=0, ub=1)
-                         for i in range(self.numTests)]
+        # self.use_vars = [self.model.continuous_var(name='use_{0}'.format(i), lb=0, ub=1)
+        #                  for i in range(self.numTests)]
+        self.use_vars = self.model.continuous_var_list(self.numTests, lb=0, ub=1, name=lambda x: f'use_{x}')
         
         print("[INFO] created decision variables")
         
@@ -88,15 +89,14 @@ class IPInstance:
             for j in range(i + 1, self.numDiseases):
                 if i != j:
                     diff = [np.abs(self.A[k][j] - self.A[k][i]) for k in range(self.numTests)]
-                    diff_x_use = [diff[k] * self.use_vars[k] for k in range(self.numTests)]
                     constraint_count += 1
+                    diff_x_use = self.model.scal_prod(self.use_vars, diff)
                     batch_constraints.append(self.model.sum(diff_x_use) >= 1)
-                    # self.model.add_constraint(self.model.sum(diff_x_use) >= 1)
         self.model.add_constraints(batch_constraints)
         print("[INFO] added constraints:", constraint_count)
         
         # minimize the costs of all the used tests
-        costs = [self.use_vars[i] * self.costOfTest[i] for i in range(self.numTests)]
+        costs = self.model.scal_prod(self.use_vars, self.costOfTest)
         self.model.minimize(self.model.sum(costs))
         
         # ------------------ INITIALIZE BRANCH AND BOUND -----------------

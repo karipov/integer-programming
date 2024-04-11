@@ -21,3 +21,6 @@ source p4_venv/bin/activate
 
 # run the solver
 python3.9 src/main.py $input
+
+# run solver with profiler
+# pyinstrument src/main.py $input
