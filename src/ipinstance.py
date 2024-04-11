@@ -70,7 +70,7 @@ class IPInstance:
         self.numDiseases = numD
         self.costOfTest = cst
         self.A = A
-        self.model = Model() #CPLEX solver
+        self.model = Model(checker="off") #CPLEX solver
         np.random.seed(44)
         
         # add problem constraints: use_vars[i] = 1 if test i is used, 0 otherwise
@@ -83,13 +83,16 @@ class IPInstance:
 
         # for every pair of diseases, there must be at least one test that can distinguish them
         constraint_count = 0
+        batch_constraints = []
         for i in range(self.numDiseases):
             for j in range(i + 1, self.numDiseases):
                 if i != j:
                     diff = [np.abs(self.A[k][j] - self.A[k][i]) for k in range(self.numTests)]
                     diff_x_use = [diff[k] * self.use_vars[k] for k in range(self.numTests)]
                     constraint_count += 1
-                    self.model.add_constraint(self.model.sum(diff_x_use) >= 1)
+                    batch_constraints.append(self.model.sum(diff_x_use) >= 1)
+                    # self.model.add_constraint(self.model.sum(diff_x_use) >= 1)
+        self.model.add_constraints(batch_constraints)
         print("[INFO] added constraints:", constraint_count)
         
         # minimize the costs of all the used tests
@@ -99,16 +102,16 @@ class IPInstance:
         # ------------------ INITIALIZE BRANCH AND BOUND -----------------
         
         # intialize heuristic variables related to heuristics and search strategies
-        COST_MULTIPLIER = 1
-        self.cost_effective_use = {}
-        for i in range(self.numTests):
-            discriminative = 0
-            for j in range(self.numDiseases):
-                for k in range(self.numDiseases):
-                    if (j != k):
-                        discriminative += np.abs(self.A[i][j] - self.A[i][k])
-            self.cost_effective_use[f"use_{i}"] = discriminative \
-                / (self.costOfTest[i] * COST_MULTIPLIER)
+        # COST_MULTIPLIER = 1
+        # self.cost_effective_use = {}
+        # for i in range(self.numTests):
+        #     discriminative = 0
+        #     for j in range(self.numDiseases):
+        #         for k in range(i + 1, self.numDiseases):
+        #             if (j != k):
+        #                 discriminative += np.abs(self.A[i][j] - self.A[i][k])
+        #     self.cost_effective_use[f"use_{i}"] = discriminative \
+        #         / (self.costOfTest[i] * COST_MULTIPLIER)
         self.mixed_search_switched = False
         
         # initialize incumbent variables
@@ -263,7 +266,7 @@ class IPInstance:
         print("[INFO] starting branch and bound")
         
         heuristic = "fractional"
-        search_strategy = "mixed_random" # best_first / depth_first / mixed / mixed_random
+        search_strategy = "depth_first" # best_first / depth_first / mixed / mixed_random
         
         print("[INFO] using heuristic:", heuristic)
         print("[INFO] using search strategy:", search_strategy)
