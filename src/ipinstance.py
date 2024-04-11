@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-import numpy  as np
+import numpy as np
 from docplex.mp.model import Model
 import heapq as pq
 from functools import total_ordering
@@ -64,13 +64,14 @@ class Node:
     
 
 class IPInstance:
-    def __init__(self,filename : str) -> None:
+    def __init__(self, filename: str) -> None:
         numT,numD,cst,A = data_parse(filename)
         self.numTests = numT
         self.numDiseases = numD
         self.costOfTest = cst
         self.A = A
         self.model = Model() #CPLEX solver
+        np.random.seed(44)
         
         # add problem constraints: use_vars[i] = 1 if test i is used, 0 otherwise
         self.use_vars = [self.model.continuous_var(name='use_{0}'.format(i), lb=0, ub=1)
@@ -81,12 +82,15 @@ class IPInstance:
         # ---------------------- DECISION VARIABLES ----------------------
 
         # for every pair of diseases, there must be at least one test that can distinguish them
+        constraint_count = 0
         for i in range(self.numDiseases):
-            for j in range(self.numDiseases):
-                if (i!= j): 
+            for j in range(i + 1, self.numDiseases):
+                if i != j:
                     diff = [np.abs(self.A[k][j] - self.A[k][i]) for k in range(self.numTests)]
                     diff_x_use = [diff[k] * self.use_vars[k] for k in range(self.numTests)]
+                    constraint_count += 1
                     self.model.add_constraint(self.model.sum(diff_x_use) >= 1)
+        print("[INFO] added constraints:", constraint_count)
         
         # minimize the costs of all the used tests
         costs = [self.use_vars[i] * self.costOfTest[i] for i in range(self.numTests)]
@@ -103,7 +107,8 @@ class IPInstance:
                 for k in range(self.numDiseases):
                     if (j != k):
                         discriminative += np.abs(self.A[i][j] - self.A[i][k])
-            self.cost_effective_use[f"use_{i}"] = discriminative / (self.costOfTest[i] * COST_MULTIPLIER)
+            self.cost_effective_use[f"use_{i}"] = discriminative \
+                / (self.costOfTest[i] * COST_MULTIPLIER)
         
         # store the incumbent
         self.incumbent: Node = Node(float('inf'))
@@ -111,8 +116,9 @@ class IPInstance:
         # initialize the priority queue to the root node
         objective_value, solution = self.solve_lp()
 
-        self.priority_queue = []
-        pq.heappush(self.priority_queue,
+        self.queue = []
+        # the "pq" module works over python lists, so no need to initialize a stack structure
+        pq.heappush(self.queue,
                     Node(objective_value, {}, self.pick_variable({}, solution, "fractional")))
   
     def toString(self):
@@ -125,7 +131,7 @@ class IPInstance:
         out += f"A:\n{A_str}"
         return out
 
-    def branch(self, parent: Node, heuristic: str):
+    def branch(self, parent: Node, heuristic: str, search_strategy: str):
         """ Gives us two children nodes by branching on the next variable """
         
         # make the children nodes (solve the LP relaxation for each child node)
@@ -161,7 +167,11 @@ class IPInstance:
             
             # add the new node to the priority queue
             new_node = Node(new_objective, new_decisions, next_variable)
-            pq.heappush(self.priority_queue, new_node)
+            
+            if search_strategy == "best_first":
+                pq.heappush(self.queue, new_node)
+            elif search_strategy == "depth_first":
+                self.queue.append(new_node)
     
     def pick_variable(self, current_decisions: dict, solution, heuristic: str) -> str:
         """ Heuristics for picking the next variable """
@@ -176,12 +186,16 @@ class IPInstance:
         # print("[INFO] integer variables:", {i: round(solution[i], 4) for i in use_vars_available if i not in use_vars_noninteger})
         # print("[INFO] fractional variables cost-effective:", {i: round(self.cost_effective_use[i], 4) for i in use_vars_noninteger})
         
+        # early exit here if using random heuristic
+        if heuristic == "random":
+            return str(np.random.choice(use_vars_noninteger))
+        
         # check how close each variable is to being an integer
         # TODO: apparently, solution[i] simply returns 0 and doesn't fail. do we do smth about it?
         thresh = {i: abs(solution[i] - round(solution[i])) for i in use_vars_noninteger}
         assert max(thresh) != 0, "No fractional variables found"
         
-        # choose heuristic
+        # choose more sophisticated heuristic
         chosen_var = None
         if heuristic == "cost_effective":
             # get the heuristic of each test and sort by highest value first
@@ -189,9 +203,13 @@ class IPInstance:
                              for i in use_vars_noninteger]
             chosen_var = max(use_vars_cost, key=lambda x: x[1])[0]
         elif heuristic == "fractional":
+            # choose the most fractional variable
             chosen_var = max(thresh, key=thresh.get)
-        elif heuristic == "random":
-            chosen_var = str(np.random.choice(use_vars_noninteger))
+        elif heuristic == "random_top_fractional":
+            # choose a random variable from the top 10%
+            n = int(len(use_vars_noninteger) * 0.1) if len(use_vars_noninteger) > 10 else 1
+            top_fractional = pq.nlargest(n, thresh, key=thresh.get)
+            chosen_var = str(np.random.choice(top_fractional))
         else:
             raise ValueError("Invalid heuristic")
 
@@ -229,19 +247,26 @@ class IPInstance:
         """ Branch and bound implementation to solve IP using LP"""
         print("[INFO] starting branch and bound")
         
-        heuristic = "random"
+        heuristic = "fractional"
+        search_strategy = "best_first" # best_first or depth_first
+        
         print("[INFO] using heuristic:", heuristic)
+        print("[INFO] using search strategy:", search_strategy)
+        
         counter = 0
-        while self.priority_queue:
+        while self.queue:
             counter += 1
             if counter % 50 == 0:
-                print(f"[INFO] iteration {counter}")
+                print(f"[INFO] nodes visited: {counter}")
             
             # pick the next node to explore
-            parent_node = pq.heappop(self.priority_queue)
+            if search_strategy == "best_first":
+                parent_node = pq.heappop(self.queue)
+            else:
+                parent_node = self.queue.pop()
 
             # branch on the node
-            self.branch(parent_node, heuristic)
+            self.branch(parent_node, heuristic, search_strategy)
         
         # when done, return the incumbent
         print("[INFO] final iteration", counter)
