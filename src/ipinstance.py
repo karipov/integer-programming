@@ -37,7 +37,7 @@ def check_integer_solution(solution, num_tests) -> bool:
     """
     Checks if our LP relaxation solution is a solution to the IP problem
     """
-    threshold = 1e-5
+    threshold = 1e-3
     thresh_check = lambda x: abs(x - round(x)) < threshold
     all_values = [solution.get_value(f"use_{i}") for i in range(num_tests)]
     return all(map(thresh_check, all_values))
@@ -98,7 +98,7 @@ class IPInstance:
         
         # ------------------ INITIALIZE BRANCH AND BOUND -----------------
         
-        # intialize heuristic variables
+        # intialize heuristic variables related to heuristics and search strategies
         COST_MULTIPLIER = 1
         self.cost_effective_use = {}
         for i in range(self.numTests):
@@ -109,9 +109,12 @@ class IPInstance:
                         discriminative += np.abs(self.A[i][j] - self.A[i][k])
             self.cost_effective_use[f"use_{i}"] = discriminative \
                 / (self.costOfTest[i] * COST_MULTIPLIER)
+        self.mixed_search_switched = False
         
-        # store the incumbent
+        # initialize incumbent variables
         self.incumbent: Node = Node(float('inf'))
+        self.incumbent_changes = 0
+        self.dominated_counter = 0
 
         # initialize the priority queue to the root node
         objective_value, solution = self.solve_lp()
@@ -152,6 +155,7 @@ class IPInstance:
             
             # check if dominated by the incumbent
             if new_objective >= self.incumbent.lp_objective_value:
+                self.dominated_counter += 1
                 continue
             
             # check if we have a new incumbent / solution is IP
@@ -160,6 +164,8 @@ class IPInstance:
                 if new_objective < self.incumbent.lp_objective_value:
                     # if so, update the incumbent
                     self.incumbent = Node(new_objective, new_decisions)
+                    self.incumbent_changes += 1
+                    print(f"[INFO] incumbent: value {self.incumbent.lp_objective_value} counter {self.incumbent_changes}")
                 continue
                 
             # pre-choose some variable to branch on based on current decisions + some heuristic
@@ -172,6 +178,15 @@ class IPInstance:
                 pq.heappush(self.queue, new_node)
             elif search_strategy == "depth_first":
                 self.queue.append(new_node)
+            elif search_strategy == "mixed":
+                if self.mixed_search_switched:
+                    pq.heappush(self.queue, new_node)
+                else:
+                    self.queue.append(new_node)
+            elif search_strategy == "mixed_random":
+                self.queue.append(new_node)
+            else:
+                raise ValueError("Invalid search strategy")
     
     def pick_variable(self, current_decisions: dict, solution, heuristic: str) -> str:
         """ Heuristics for picking the next variable """
@@ -248,7 +263,7 @@ class IPInstance:
         print("[INFO] starting branch and bound")
         
         heuristic = "fractional"
-        search_strategy = "best_first" # best_first or depth_first
+        search_strategy = "mixed_random" # best_first / depth_first / mixed / mixed_random
         
         print("[INFO] using heuristic:", heuristic)
         print("[INFO] using search strategy:", search_strategy)
@@ -257,13 +272,33 @@ class IPInstance:
         while self.queue:
             counter += 1
             if counter % 50 == 0:
-                print(f"[INFO] nodes visited: {counter}")
-            
+                print(f"[INFO] nodes visited: {counter} (dominated: {self.dominated_counter})")
+
             # pick the next node to explore
             if search_strategy == "best_first":
                 parent_node = pq.heappop(self.queue)
-            else:
+            elif search_strategy == "depth_first":
                 parent_node = self.queue.pop()
+            elif search_strategy == "mixed":
+                # switch to best-first search after a certain number of incumbent changes
+                if self.incumbent_changes >= 1:
+                    if not self.mixed_search_switched:
+                        print("[INFO] switching to best-first at node", counter)
+                        pq.heapify(self.queue)
+                        self.mixed_search_switched = True
+
+                    parent_node = pq.heappop(self.queue)
+                else:
+                    parent_node = self.queue.pop()
+            elif search_strategy == "mixed_random":
+                if self.incumbent_changes >= 1 and (not self.mixed_search_switched):
+                    print("[INFO] switching to random heuristic at node", counter)
+                    self.mixed_search_switched = True
+                    heuristic = "random" # after switching, use random heuristic
+
+                parent_node = self.queue.pop()
+            else:
+                raise ValueError("Invalid search strategy")
 
             # branch on the node
             self.branch(parent_node, heuristic, search_strategy)
