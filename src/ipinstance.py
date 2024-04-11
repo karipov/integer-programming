@@ -76,7 +76,7 @@ class IPInstance:
         self.use_vars = [self.model.continuous_var(name='use_{0}'.format(i), lb=0, ub=1)
                          for i in range(self.numTests)]
         
-        print("[INFO] created initial vars")
+        print("[INFO] created decision variables")
         
         # ---------------------- DECISION VARIABLES ----------------------
 
@@ -113,7 +113,7 @@ class IPInstance:
 
         self.priority_queue = []
         pq.heappush(self.priority_queue,
-                    Node(objective_value, {}, self.pick_variable({}, solution)))
+                    Node(objective_value, {}, self.pick_variable({}, solution, "fractional")))
   
     def toString(self):
         out = ""
@@ -125,11 +125,11 @@ class IPInstance:
         out += f"A:\n{A_str}"
         return out
 
-    def branch(self, parent: Node):
+    def branch(self, parent: Node, heuristic: str):
         """ Gives us two children nodes by branching on the next variable """
         
         # make the children nodes (solve the LP relaxation for each child node)
-        for decision in [1, 0]:
+        for decision in [0, 1]:
             # create a new node with the parent's decisions + the new decision
             new_decisions = parent.decisions.copy()
             new_decisions[parent.next_variable] = decision
@@ -157,13 +157,13 @@ class IPInstance:
                 continue
                 
             # pre-choose some variable to branch on based on current decisions + some heuristic
-            next_variable = self.pick_variable(new_decisions, new_solution)
+            next_variable = self.pick_variable(new_decisions, new_solution, heuristic)
             
             # add the new node to the priority queue
             new_node = Node(new_objective, new_decisions, next_variable)
             pq.heappush(self.priority_queue, new_node)
     
-    def pick_variable(self, current_decisions: dict, solution) -> str:
+    def pick_variable(self, current_decisions: dict, solution, heuristic: str) -> str:
         """ Heuristics for picking the next variable """
         use_vars = [f"use_{i}" for i in range(self.numTests)]
         use_vars_available = [i for i in use_vars if i not in current_decisions]
@@ -172,20 +172,32 @@ class IPInstance:
         # filter only the variables that are not integers
         is_integer = lambda x: abs(x - round(x)) < 1e-5
         use_vars_noninteger = [i for i in use_vars_available if not is_integer(solution[i])]
+        # print("[INFO] fractional variables:", {i: round(solution[i], 4) for i in use_vars_noninteger})
+        # print("[INFO] integer variables:", {i: round(solution[i], 4) for i in use_vars_available if i not in use_vars_noninteger})
+        # print("[INFO] fractional variables cost-effective:", {i: round(self.cost_effective_use[i], 4) for i in use_vars_noninteger})
         
         # check how close each variable is to being an integer
         # TODO: apparently, solution[i] simply returns 0 and doesn't fail. do we do smth about it?
         thresh = {i: abs(solution[i] - round(solution[i])) for i in use_vars_noninteger}
         assert max(thresh) != 0, "No fractional variables found"
         
-        return max(thresh, key=thresh.get)
+        # choose heuristic
+        chosen_var = None
+        if heuristic == "cost_effective":
+            # get the heuristic of each test and sort by highest value first
+            use_vars_cost = [(i, round(self.cost_effective_use[i] * thresh[i], 2))
+                             for i in use_vars_noninteger]
+            chosen_var = max(use_vars_cost, key=lambda x: x[1])[0]
+        elif heuristic == "fractional":
+            chosen_var = max(thresh, key=thresh.get)
+        elif heuristic == "random":
+            chosen_var = str(np.random.choice(use_vars_noninteger))
+        else:
+            raise ValueError("Invalid heuristic")
 
-        # # get the heuristic of each test and sort by highest value first
-        # use_vars_cost = [(i, round(self.cost_effective_use[i] * (thresh[i] ** 2), 2)) for i in use_vars_noninteger]
-        # top_var = max(use_vars_cost, key=lambda x: x[1])[0]
-        # # print("[INFO]",top_var, use_vars_cost)
-        
-        # return top_var
+        # print("[INFO] chosen variable:", chosen_var, "with value:", solution[chosen_var])
+        # print()
+        return chosen_var
 
     def add_decisions(self, new_decisions: dict):
         """ Update the model with the new decisions """
@@ -215,14 +227,24 @@ class IPInstance:
 
     def solve_ip(self) -> Node:
         """ Branch and bound implementation to solve IP using LP"""
+        print("[INFO] starting branch and bound")
+        
+        heuristic = "random"
+        print("[INFO] using heuristic:", heuristic)
+        counter = 0
         while self.priority_queue:
+            counter += 1
+            if counter % 50 == 0:
+                print(f"[INFO] iteration {counter}")
+            
             # pick the next node to explore
             parent_node = pq.heappop(self.priority_queue)
 
             # branch on the node
-            self.branch(parent_node)
+            self.branch(parent_node, heuristic)
         
         # when done, return the incumbent
+        print("[INFO] final iteration", counter)
         print("[INFO] done with branch and bound")
         return self.incumbent
             
