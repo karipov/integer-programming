@@ -211,6 +211,11 @@ class IPInstance:
             # pick the next node to explore
             parent_node = self.queue.get(block=True)
             
+            # if parent is newly dominated by the incumbent, skip
+            if parent_node.lp_objective_value >= self.incumbent.lp_objective_value:
+                self.queue.task_done()
+                continue
+            
             # branch on the node
             self.branch(model_clone, parent_node)
             
