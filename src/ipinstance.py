@@ -1,15 +1,12 @@
 from dataclasses import dataclass
 import numpy as np
 from docplex.mp.model import Model
-import heapq as pq
+import queue
+import threading
 from functools import total_ordering
 
 @dataclass(frozen=True)
 class IPConfig:
-    numTests: int # number of tests
-    numDiseases: int # number of diseases
-    costOfTest: np.ndarray #[numTests] the cost of each test
-    A: np.ndarray #[numTests][numDiseases] 0/1 matrix if test is positive for disease
     numTests: int # number of tests
     numDiseases: int # number of diseases
     costOfTest: np.ndarray #[numTests] the cost of each test
@@ -29,7 +26,7 @@ def data_parse(filename : str) :
         return numTests, numDiseases, costOfTest, A
 
     except Exception as e:
-        print(f"Error reading instance file. File format may be incorrect.{e}")
+        # print(f"Error reading instance file. File format may be incorrect.{e}")
         exit(1)
 
 
@@ -71,18 +68,17 @@ class IPInstance:
         self.costOfTest = cst
         self.A = A
         self.model = Model(checker="off") #CPLEX solver
+        self.model_lock = threading.Lock()
         np.random.seed(44)
-        
-        # add problem constraints: use_vars[i] = 1 if test i is used, 0 otherwise
-        # self.use_vars = [self.model.continuous_var(name='use_{0}'.format(i), lb=0, ub=1)
-        #                  for i in range(self.numTests)]
-        self.use_vars = self.model.continuous_var_list(self.numTests, lb=0, ub=1, name=lambda x: f'use_{x}')
-        
-        print("[INFO] created decision variables")
-        
+
         # ---------------------- DECISION VARIABLES ----------------------
 
-        # for every pair of diseases, there must be at least one test that can distinguish them
+        self.use_vars = self.model.continuous_var_list(self.numTests, lb=0, ub=1, name=lambda x: f'use_{x}')
+        print("[INFO] created decision variables")
+        
+        # ------------------------- CONSTRAINTS  -------------------------
+
+        # each disease must be detected by at least one test
         constraint_count = 0
         batch_constraints = []
         for i in range(self.numDiseases):
@@ -94,38 +90,24 @@ class IPInstance:
                     batch_constraints.append(self.model.sum(diff_x_use) >= 1)
         self.model.add_constraints(batch_constraints)
         print("[INFO] added constraints:", constraint_count)
-        
+
         # minimize the costs of all the used tests
         costs = self.model.scal_prod(self.use_vars, self.costOfTest)
         self.model.minimize(self.model.sum(costs))
-        
+
         # ------------------ INITIALIZE BRANCH AND BOUND -----------------
-        
-        # intialize heuristic variables related to heuristics and search strategies
-        # COST_MULTIPLIER = 1
-        # self.cost_effective_use = {}
-        # for i in range(self.numTests):
-        #     discriminative = 0
-        #     for j in range(self.numDiseases):
-        #         for k in range(i + 1, self.numDiseases):
-        #             if (j != k):
-        #                 discriminative += np.abs(self.A[i][j] - self.A[i][k])
-        #     self.cost_effective_use[f"use_{i}"] = discriminative \
-        #         / (self.costOfTest[i] * COST_MULTIPLIER)
-        self.mixed_search_switched = False
-        
+
+        # initialize the queue to the root node
+        objective_value, solution = self.solve_lp(self.model)
+
+        self.queue: queue.Queue = queue.LifoQueue()
+        self.queue.put(Node(objective_value, {}, self.pick_variable({}, solution)))
+
         # initialize incumbent variables
         self.incumbent: Node = Node(float('inf'))
-        self.incumbent_changes = 0
-        self.dominated_counter = 0
-
-        # initialize the priority queue to the root node
-        objective_value, solution = self.solve_lp()
-
-        self.queue = []
-        # the "pq" module works over python lists, so no need to initialize a stack structure
-        pq.heappush(self.queue,
-                    Node(objective_value, {}, self.pick_variable({}, solution, "fractional")))
+        self.incumbent_lock = threading.Lock()
+        
+        self.done = threading.Event()
   
     def toString(self):
         out = ""
@@ -137,7 +119,7 @@ class IPInstance:
         out += f"A:\n{A_str}"
         return out
 
-    def branch(self, parent: Node, heuristic: str, search_strategy: str):
+    def branch(self, model, parent: Node):
         """ Gives us two children nodes by branching on the next variable """
         
         # make the children nodes (solve the LP relaxation for each child node)
@@ -145,12 +127,11 @@ class IPInstance:
             # create a new node with the parent's decisions + the new decision
             new_decisions = parent.decisions.copy()
             new_decisions[parent.next_variable] = decision
-            
+
             # need to update the model with the new decisions and solve the LP relaxation
-            decision_constraints = self.add_decisions(new_decisions)
-            new_objective, new_solution = self.solve_lp()
-            # make sure to remove the decision constraints for the next iteration
-            self.remove_decisions(decision_constraints) 
+            constraints = self.add_decisions(model, new_decisions)
+            new_objective, new_solution = self.solve_lp(model)
+            self.remove_decisions(model, constraints)
             
             # check if the solution is feasible
             if new_objective is None:
@@ -158,7 +139,6 @@ class IPInstance:
             
             # check if dominated by the incumbent
             if new_objective >= self.incumbent.lp_objective_value:
-                self.dominated_counter += 1
                 continue
             
             # check if we have a new incumbent / solution is IP
@@ -166,160 +146,106 @@ class IPInstance:
                 # check if the new integer solution is better than the incumbent
                 if new_objective < self.incumbent.lp_objective_value:
                     # if so, update the incumbent
-                    self.incumbent = Node(new_objective, new_decisions)
-                    self.incumbent_changes += 1
-                    print(f"[INFO] incumbent: value {self.incumbent.lp_objective_value} counter {self.incumbent_changes}")
+                    with self.incumbent_lock:
+                        # print("[INFO] new incumbent found:", new_objective)
+                        self.incumbent = Node(new_objective, new_decisions)
                 continue
-                
-            # pre-choose some variable to branch on based on current decisions + some heuristic
-            next_variable = self.pick_variable(new_decisions, new_solution, heuristic)
-            
+
+            # pre-choose some variable to branch on based on current decisions
+            next_variable = self.pick_variable(new_decisions, new_solution)
+
             # add the new node to the priority queue
             new_node = Node(new_objective, new_decisions, next_variable)
             
-            if search_strategy == "best_first":
-                pq.heappush(self.queue, new_node)
-            elif search_strategy == "depth_first":
-                self.queue.append(new_node)
-            elif search_strategy == "mixed":
-                if self.mixed_search_switched:
-                    pq.heappush(self.queue, new_node)
-                else:
-                    self.queue.append(new_node)
-            elif search_strategy == "mixed_random":
-                self.queue.append(new_node)
-            else:
-                raise ValueError("Invalid search strategy")
+            # add the new node to the queue
+            self.queue.put(new_node)
     
-    def pick_variable(self, current_decisions: dict, solution, heuristic: str) -> str:
+    def pick_variable(self, current_decisions: dict, solution) -> str:
         """ Heuristics for picking the next variable """
         use_vars = [f"use_{i}" for i in range(self.numTests)]
         use_vars_available = [i for i in use_vars if i not in current_decisions]
-        assert len(use_vars_available) > 0, "No variables left to branch on"
-        
-        # filter only the variables that are not integers
-        is_integer = lambda x: abs(x - round(x)) < 1e-5
-        use_vars_noninteger = [i for i in use_vars_available if not is_integer(solution[i])]
-        # print("[INFO] fractional variables:", {i: round(solution[i], 4) for i in use_vars_noninteger})
-        # print("[INFO] integer variables:", {i: round(solution[i], 4) for i in use_vars_available if i not in use_vars_noninteger})
-        # print("[INFO] fractional variables cost-effective:", {i: round(self.cost_effective_use[i], 4) for i in use_vars_noninteger})
-        
-        # early exit here if using random heuristic
-        if heuristic == "random":
-            return str(np.random.choice(use_vars_noninteger))
         
         # check how close each variable is to being an integer
-        # TODO: apparently, solution[i] simply returns 0 and doesn't fail. do we do smth about it?
-        thresh = {i: abs(solution[i] - round(solution[i])) for i in use_vars_noninteger}
-        assert max(thresh) != 0, "No fractional variables found"
-        
-        # choose more sophisticated heuristic
-        chosen_var = None
-        if heuristic == "cost_effective":
-            # get the heuristic of each test and sort by highest value first
-            use_vars_cost = [(i, round(self.cost_effective_use[i] * thresh[i], 2))
-                             for i in use_vars_noninteger]
-            chosen_var = max(use_vars_cost, key=lambda x: x[1])[0]
-        elif heuristic == "fractional":
-            # choose the most fractional variable
-            chosen_var = max(thresh, key=thresh.get)
-        elif heuristic == "random_top_fractional":
-            # choose a random variable from the top 10%
-            n = int(len(use_vars_noninteger) * 0.1) if len(use_vars_noninteger) > 10 else 1
-            top_fractional = pq.nlargest(n, thresh, key=thresh.get)
-            chosen_var = str(np.random.choice(top_fractional))
-        else:
-            raise ValueError("Invalid heuristic")
+        thresh = {i: abs(solution[i] - round(solution[i])) for i in use_vars_available}
 
-        # print("[INFO] chosen variable:", chosen_var, "with value:", solution[chosen_var])
-        # print()
-        return chosen_var
+        # choose the most fractional variable
+        return max(thresh, key=thresh.get)
 
-    def add_decisions(self, new_decisions: dict):
+    def add_decisions(self, model, new_decisions: dict):
         """ Update the model with the new decisions """
         # add new decisions to the model
-        # print("[INFO]", new_decisions)
-        decision_constraints = [self.use_vars[int(i.split('_')[1])] == new_decisions[i] for i in new_decisions]
-        new_constraints = self.model.add_constraints(decision_constraints)
+        use_names = [f"use_{i}" for i in range(self.numTests)]
+        use_vars = [model.get_var_by_name(i) for i in use_names]
+        
+        decision_constraints = [use_vars[int(i.split('_')[1])] == new_decisions[i] for i in new_decisions]
+        new_constraints = model.add_constraints(decision_constraints)
         
         # return the new constraints (they will need to be cleared in the future)
         return new_constraints
 
-    def remove_decisions(self, old_constraints):
+    def remove_decisions(self, model, old_constraints):
         """ Remove the decisions from the model """
-        self.model.remove_constraints(old_constraints)
+        model.remove_constraints(old_constraints)
 
-    def solve_lp(self):
+    def solve_lp(self, model):
         """ Solve the LP relaxation """
-        solution = self.model.solve()
-        
+        solution = model.solve()
+
         if not solution:
-            # print("No solution found!")
             return None, None
         else:
-            # self.model.print_information()
-            # print(f"Objective Value: {self.model.objective_value}")
-            return self.model.objective_value, solution
+            return model.objective_value, solution
+    
+    def solve_ip_worker(self):
+        with self.model_lock:
+            model_clone = self.model.clone()
+
+        idx = threading.get_ident() % 1000
+        # print("[INFO] starting thread", idx)
+
+        counter = 0
+        while self.done.is_set() == False:
+            # if counter % 100 == 0:
+            #     print(f"[INFO] thread {idx} has solved {counter} nodes")
+
+            # pick the next node to explore
+            parent_node = self.queue.get(block=True)
+            
+            # if parent is newly dominated by the incumbent, skip
+            if parent_node.lp_objective_value >= self.incumbent.lp_objective_value:
+                self.queue.task_done()
+                continue
+            
+            # branch on the node
+            self.branch(model_clone, parent_node)
+            
+            # mark the task as done
+            self.queue.task_done()
+            
+            counter += 1
+        
+        # print("[INFO] thread", idx, "is done at node", counter)
 
     def solve_ip(self) -> Node:
         """ Branch and bound implementation to solve IP using LP"""
         print("[INFO] starting branch and bound")
         
-        heuristic = "fractional"
-        search_strategy = "depth_first" # best_first / depth_first / mixed / mixed_random
+        # start parallel processing
+        threads = []
+        for _ in range(5):
+            t = threading.Thread(target=self.solve_ip_worker)
+            t.daemon = True
+            t.start()
+            threads.append(t)
+
+        # wait for all threads to finish
+        self.queue.join()
+        self.done.set()
         
-        print("[INFO] using heuristic:", heuristic)
-        print("[INFO] using search strategy:", search_strategy)
-        
-        counter = 0
-        while self.queue:
-            counter += 1
-            if counter % 50 == 0:
-                print(f"[INFO] nodes visited: {counter} (dominated: {self.dominated_counter})")
+        # print("[INFO] waiting for threads to finish")
+        # for t in threads:
+        #     t.join()
 
-            # pick the next node to explore
-            if search_strategy == "best_first":
-                parent_node = pq.heappop(self.queue)
-            elif search_strategy == "depth_first":
-                parent_node = self.queue.pop()
-            elif search_strategy == "mixed":
-                # switch to best-first search after a certain number of incumbent changes
-                if self.incumbent_changes >= 1:
-                    if not self.mixed_search_switched:
-                        print("[INFO] switching to best-first at node", counter)
-                        pq.heapify(self.queue)
-                        self.mixed_search_switched = True
-
-                    parent_node = pq.heappop(self.queue)
-                else:
-                    parent_node = self.queue.pop()
-            elif search_strategy == "mixed_random":
-                if self.incumbent_changes >= 1 and (not self.mixed_search_switched):
-                    print("[INFO] switching to random heuristic at node", counter)
-                    self.mixed_search_switched = True
-                    heuristic = "random" # after switching, use random heuristic
-
-                parent_node = self.queue.pop()
-            else:
-                raise ValueError("Invalid search strategy")
-
-            # branch on the node
-            self.branch(parent_node, heuristic, search_strategy)
-        
         # when done, return the incumbent
-        print("[INFO] final iteration", counter)
         print("[INFO] done with branch and bound")
         return self.incumbent
-            
-            
-            
-            
-        
-
-
-    
-
-
-    
-
-  
